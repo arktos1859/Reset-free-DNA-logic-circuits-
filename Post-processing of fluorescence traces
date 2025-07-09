@@ -1,0 +1,88 @@
+import sys
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
+from scipy.signal import savgol_filter
+
+def process_excel(input_path: Path, output_path: Path,
+                  window_length: int = 20,
+                  polyorder: int = 1,
+                  threshold: float = 0.01):
+    """
+    Load each sheet in the input Excel file, apply Savitzky–Golay smoothing
+    and derivative, then threshold the derivative. Results are written
+    to the same sheet names in a new Excel file.
+
+    Parameters
+    ----------
+    input_path : Path
+        Path to the source Excel file.
+    output_path : Path
+        Path where the processed Excel file will be saved.
+    window_length : int, optional
+        Window length (must be odd) for the Savitzky–Golay filter.
+    polyorder : int, optional
+        Polynomial order for the Savitzky–Golay filter.
+    threshold : float, optional
+        Minimum absolute derivative value to keep; values below this
+        will be set to zero.
+    """
+    # Ensure window_length is valid for each sheet
+    xls = pd.ExcelFile(input_path)
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        for sheet in xls.sheet_names:
+            df = pd.read_excel(xls, sheet_name=sheet)
+            df_out = df.copy()
+
+            # Identify numeric columns
+            num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+            # Detect cycle column if it's sequential integers starting at 1
+            cycles = None
+            data_cols = num_cols
+            if len(num_cols) >= 2:
+                first_col = num_cols[0]
+                arr = df[first_col].dropna().astype(int).values
+                if arr.size > 1 and np.array_equal(arr, np.arange(1, arr.size + 1)):
+                    cycles = arr
+                    data_cols = num_cols[1:]
+            if cycles is None:
+                cycles = np.arange(1, len(df_out) + 1)
+
+            # Adjust window_length if sheet is shorter than default
+            n = len(df_out)
+            wl = window_length if n >= window_length else (n // 2) * 2 + 1
+
+            for col in data_cols:
+                y = df[col].astype(float).values
+
+                # 1) Smooth the signal
+                y_smooth = savgol_filter(y, window_length=wl, polyorder=polyorder)
+                df_out[f'{col}_smoothed'] = y_smooth
+
+                # 2) Compute first derivative
+                dy = savgol_filter(
+                    y,
+                    window_length=wl,
+                    polyorder=polyorder,
+                    deriv=1,
+                    delta=1.0
+                )
+                df_out[f'{col}_derivative'] = dy
+
+                # 3) Threshold the derivative
+                dy_thresh = np.where(np.abs(dy) >= threshold, dy, 0)
+                df_out[f'{col}_thresh_derivative'] = dy_thresh
+
+            # Write processed sheet to output
+            df_out.to_excel(writer, sheet_name=sheet, index=False)
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Usage: python process_qpcr.py <input_excel_path> <output_excel_path>")
+        sys.exit(1)
+
+    input_path = Path(sys.argv[1])
+    output_path = Path(sys.argv[2])
+    process_excel(input_path, output_path)
